@@ -106,6 +106,7 @@
         if ($ClosedPorts.Length -eq 0) {
             [void]$LogStringBuilder.AppendLine('PASSED')
         } else {
+            echo $ClosedPorts
             [void]$LogStringBuilder.AppendLine('FAILED')
             [void]$LogStringBuilder.AppendLine('Refer to the following doc to enable required ports: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#opening-firewall')
         }
@@ -289,13 +290,19 @@ function Test-CheckKerberos {
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
     [void]$LogStringBuilder.Append('Kerberos ticket check: ')
-    $KerberosTicketStatus = klist
-    $RegexValue = "*" + $OnPremDomainName + "*"
-    if ($KerberosTicketStatus -like $RegexValue) {
+    $ListKerberosTicketResponse = klist
+    $RegexValue = "*krbtgt/{0}*" -f $OnPremDomainName
+    if ($ListKerberosTicketResponse -like $RegexValue) {
         [void]$LogStringBuilder.AppendLine('PASSED')
     } else {
-        [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc for obtaining a Kerberos ticket: https://docs.oracle.com/javase/7/docs/technotes/tools/windows/kinit.html')
+        $GetKerberosTicketResponse = klist get krbtgt/$OnPremDomainName
+        if ($GetKerberosTicketResponse -like "*klist failed with*") {
+            [void]$LogStringBuilder.AppendLine('FAILED')
+            [void]$LogStringBuilder.AppendLine(('Kerberos ticket did not exist and was NOT but was able to generate a new Kerberos ticket for SPN: krbtgt/{0}' -f $OnPremDomainName))
+        } else {
+            [void]$LogStringBuilder.AppendLine('PASSED')
+            [void]$LogStringBuilder.AppendLine(('Kerberos ticket did not exist but was able to generate a new Kerberos ticket for SPN: krbtgt/{0}' -f $OnPremDomainName))
+        }        
     }
 
     return $LogStringBuilder.ToString()
@@ -320,7 +327,7 @@ $OnPremIPAddresses = (Get-ADForest).Domains | %{ Get-ADDomainController -Filter 
 
 # Check for ports
 Write-Host -ForegroundColor Yellow "`n`nChecking TCP and UDP ports for on-prem domain controllers... (This operation can take up to 45sc)"
-$TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 135, 389, 445, 464, 49153, 50123, 65534 -Protocol "TCP"
+$TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 135, 389, 445, 464, 49668 <#49153, 50123, 65534#> -Protocol "TCP"
 $TCPResult | Out-File -FilePath $OutputLogPath
 $UDPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 389, 445, 464 -Protocol "UDP"
 $UDPResult | Out-File -FilePath $OutputLogPath -Append
@@ -328,12 +335,12 @@ Write-Host -ForegroundColor Yellow "`n`nCheck for TCP and UDP ports completed."
 # End of check for ports
 
 
-# Check for FQDN
+# Check for Managed AD fully qualified domain name (FQDN)
 Write-Host -ForegroundColor Yellow "`n`nChecking Managed AD domain lookup..."
 $FQDNResult = Test-CheckFQDN -ManagedADDomainName $ManagedADDomainName  
 $FQDNResult | Out-File -FilePath $OutputLogPath -Append
 Write-Host -ForegroundColor Yellow "`n`nCheck for Managed AD domain lookup completed."
-# End of check for FQDN
+# End of check for Managed AD fully qualified domain name
 
 
 # Check DNS server setup
