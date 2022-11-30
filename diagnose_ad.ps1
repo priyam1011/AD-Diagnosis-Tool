@@ -1,4 +1,81 @@
- function Test-CheckPort {
+ function Check-RunAsAdministrator()
+{
+  #Get current user context
+  $CurrentUser = New-Object Security.Principal.WindowsPrincipal $([Security.Principal.WindowsIdentity]::GetCurrent())
+  
+  #Check user is running the script is member of Administrator Group
+  if($CurrentUser.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator))
+  {
+       Write-host "Script is running with Administrator privileges!"
+  }
+  else
+    {
+       #Create a new Elevated process to Start PowerShell
+       $ElevatedProcess = New-Object System.Diagnostics.ProcessStartInfo "PowerShell";
+ 
+       # Specify the current script path and name as a parameter
+       $ElevatedProcess.Arguments = "& '" + $script:MyInvocation.MyCommand.Path + "'"
+ 
+       #Set the Process to elevated
+       $ElevatedProcess.Verb = "runas"
+ 
+       #Start the new elevated process
+       [System.Diagnostics.Process]::Start($ElevatedProcess)
+ 
+       #Exit from the current, unelevated, process
+       Exit
+ 
+    }
+}
+
+function Separate-SPNsByIPAndHost {
+    param(
+        [string[]]$SQLServerSPNs
+    )
+    $SQLServerIPSPNs = @()
+    $SQLServerHostSPNs = @()
+    foreach ($SPN in $SQLServerSPNs) {
+        try {
+            $IPAddr = [IPAddress]$SPN
+            $SQLServerIPSPNs += $IPAddr
+        } catch {
+            $SQLServerHostSPNs += $SPN
+        }
+    }
+
+    return $SQLServerIPSPNs, $SQLServerHostSPNs
+}
+
+function Test-CheckAvailableDCs {
+    param(
+        [array]$OnPremIPAddresses
+    )
+    $LogStringBuilder = [System.Text.StringBuilder]::new()
+    $AvailableDCs = @()
+    $UnreachableDCs = @()
+    $Status = ""
+    foreach ($OnPremIPAddress in $OnPremIPAddresses) {
+        $IsSuccess = Test-Connection -ComputerName $OnPremIPAddress -Quiet
+        if ($IsSuccess) {
+            $AvailableDCs += $OnPremIPAddress
+        } else {
+            $UnreachableDCs += $OnPremIPAddress
+        }
+    }
+    
+    if ($UnreachableDCs.Count -gt 0) {
+        $Status = "WARNING"
+        [void]$LogStringBuilder.AppendLine("Failed to ping domain controllers at following IP addresses: {0}" -f ($UnreachableDCs -join ', '))
+    } else {
+        $Status = "PASSED"
+    }
+
+    [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
+    
+    return $AvailableDCs, $LogStringBuilder.ToString()
+}
+
+function Test-CheckPort {
 
 [cmdletbinding(  
     DefaultParameterSetName = '',  
@@ -6,110 +83,126 @@
 )]
     param(  
         [array]$OnPremIPAddresses,
-        [array]$Ports,  
+        [array]$Ports,
         [string]$Protocol
     )
-    Begin {         
-        $ErrorActionPreference = "SilentlyContinue"  
+    Begin {
+        $ErrorActionPreference = "SilentlyContinue"
         $ClosedPorts = @()
-    }  
-    Process {
         $LogStringBuilder = [System.Text.StringBuilder]::new()
-        [void]$LogStringBuilder.Append('{0} Port check: ' -f $Protocol)
+        $WarningState = $false
+        $FailedState = $false
         $ConnectionTimeout = 1800
+    }
+    Process {
         ForEach ($IPAddress in $OnPremIPAddresses) {
             ForEach ($Port in $Ports) {
                 If ($Protocol -eq "TCP") {
                     #Create object for connecting to port on computer
                     $TCPObject = new-Object system.Net.Sockets.TcpClient
                     #Connect to remote machine's port
-                    $Connect = $TCPObject.BeginConnect($IPAddress,$Port,$null,$null)  
-                    #Configure a timeout before quitting  
-                    $Wait = $Connect.AsyncWaitHandle.WaitOne($ConnectionTimeout, $false)  
+                    $Connect = $TCPObject.BeginConnect($IPAddress,$Port,$null,$null)
+                    #Configure a timeout before quitting
+                    $Wait = $Connect.AsyncWaitHandle.WaitOne($ConnectionTimeout, $false)
                     #If timeout
-                    If(!$Wait) {  
+                    If(!$Wait) {
                         #Close connection
                         $TCPObject.Close()
                         $ClosedPorts += $Port
                     } Else {
-                        $Error.Clear()  
-                        $TCPObject.EndConnect($Connect) | out-Null  
-                        #If error  
-                        If($Error[0]){  
-                            $Failed = $true  
-                        }  
-                        #Close connection      
+                        $Error.Clear()
+                        $TCPObject.EndConnect($Connect) | out-Null
+                        #If error
+                        If($Error[0]){
+                            $Failed = $true
+                        }
+                        #Close connection
                         $TCPObject.Close()
                         #If unable to query port due to failure  
-                        If($Failed){  
-                            $ClosedPorts += $Port   
-                        } 
-                    }     
-                    #Reset failed value  
+                        If($Failed){
+                            $ClosedPorts += $Port
+                        }
+                    }
+                    #Reset failed value
                     $Failed = $null
-                }      
-                If ($Protocol -eq "UDP") {                                    
+                }
+                If ($Protocol -eq "UDP") {
                     #Create object for connecting to port on computer  
                     $UDPObject = new-Object system.Net.Sockets.Udpclient
-                    #Set a timeout on receiving message 
+                    #Set a timeout on receiving message
                     $UDPObject.Client.ReceiveTimeout = $ConnectionTimeout
-                    #Connect to remote machine's port                
-                    Write-Verbose "Making UDP connection to remote server" 
-                    $UDPObject.Connect("$IPAddress",$Port) 
-                    #Sends a message to the host to which you have connected. 
-                    Write-Verbose "Sending message to remote host" 
-                    $Message = new-object system.text.asciiencoding 
-                    $Byte = $Message.GetBytes("$(Get-Date)") 
-                    [void]$UDPObject.Send($Byte,$Byte.length) 
-                    #IPEndPoint object will allow us to read datagrams sent from any source.  
-                    Write-Verbose "Creating remote endpoint" 
-                    $RemoteEndpoint = New-Object system.net.ipendpoint([System.Net.IPAddress]::Any,0) 
-                    Try { 
-                        #Blocks until a message returns on this socket from a remote host. 
-                        Write-Verbose "Waiting for message return" 
-                        $ReceiveBytes = $UDPObject.Receive([ref]$RemoteEndpoint) 
+                    #Connect to remote machine's port
+                    $UDPObject.Connect("$IPAddress",$Port)
+                    #Sends a message to the host to which you have connected.
+                    $Message = new-object system.text.asciiencoding
+                    $Byte = $Message.GetBytes("$(Get-Date)")
+                    [void]$UDPObject.Send($Byte,$Byte.length)
+                    #IPEndPoint object will allow us to read datagrams sent from any source.
+                    $RemoteEndpoint = New-Object system.net.ipendpoint([System.Net.IPAddress]::Any,0)
+                    Try {
+                        #Blocks until a message returns on this socket from a remote host.
+                        Write-Verbose "Waiting for message return"
+                        $ReceiveBytes = $UDPObject.Receive([ref]$RemoteEndpoint)
                         [string]$ReturnData = $Message.GetString($ReceiveBytes)
                         If ($ReturnData) {
-                           Write-Verbose "Connection Successful"
-                            $UDPObject.close()   
-                        }                       
-                    } Catch { 
-                        If ($Error[0].ToString() -match "\bRespond after a period of time\b") { 
-                            #Close connection  
-                            $UDPObject.Close()  
+                           #Connection Successful
+                            $UDPObject.close()
+                        }
+                    } Catch {
+                        If ($Error[0].ToString() -match "\bRespond after a period of time\b") {
+                            #Close connection
+                            $UDPObject.Close()
                             #Make sure that the host is online and not a false positive that it is open 
-                            If (Test-Connection -comp $IPAddress -count 1 -quiet) { 
-                                Write-Verbose "Connection Open"
+                            If (Test-Connection -comp $IPAddress -count 1 -quiet) {
+                                #Connection Open
                             } Else { 
                                 <# 
                                 It is possible that the host is not online or that the host is online,  
                                 but ICMP is blocked by a firewall and this port is actually open. 
-                                #> 
-                                Write-Verbose "Host maybe unavailable"
-                                $ClosedPorts += $Port                                 
-                            }                         
-                        } ElseIf ($Error[0].ToString() -match "forcibly closed by the remote host" ) { 
-                            #Close connection  
-                            $UDPObject.Close()  
-                            Write-Verbose "Connection Timeout"  
+                                #>
+                                #Host maybe unavailable
+                                $ClosedPorts += $Port
+                            }
+                        } ElseIf ($Error[0].ToString() -match "forcibly closed by the remote host" ) {
+                            #Close connection
+                            $UDPObject.Close()
+                            #Connection Timeout
                             $ClosedPorts += $Port                        
                         } Else {                      
                             $UDPObject.close() 
                         } 
                     }
-                }                                  
-            }  
+                }                               
+            }
+
+            # Generate logs for current on-prem domain controller
+            if ($ClosedPorts.Count -gt 0) {
+                [void]$LogStringBuilder.AppendLine("Protocol: {0}. IP Address: {1}. Closed/unreachable ports: {2}" -f ($Protocol, $IPAddress, ($ClosedPorts -join ', ')))
+                $WarningState = $true
+                foreach ($ClosedPort in $ClosedPorts) {
+                    if (!($RPCPorts -Contains $ClosedPort)) {
+                        $FailedState = $true
+                        break
+                    }
+                }
+            }
+
+            # Reset closed ports for next on-prem domain controller's port check.
+            $ClosedPorts = @()
         }
-    }  
-    End {  
-        #Generate Report
-        if ($ClosedPorts.Length -eq 0) {
-            [void]$LogStringBuilder.AppendLine('PASSED')
-        } else {
-            echo $ClosedPorts
+
+        [void]$LogStringBuilder.Append('Status ({0} port check): ' -f $Protocol)
+        if ($FailedState) {
             [void]$LogStringBuilder.AppendLine('FAILED')
-            [void]$LogStringBuilder.AppendLine('Refer to the following doc to enable required ports: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#opening-firewall')
+        } else {
+            if ($WarningState) {
+                [void]$LogStringBuilder.AppendLine('WARNING')
+            } else {
+                [void]$LogStringBuilder.AppendLine('PASSED')
+            }
         }
+    }
+    End {
         return $LogStringBuilder.ToString()
     }
 }
@@ -119,10 +212,8 @@ function Test-CheckDNS {
         [string[]]$OnPremIPAddresses
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('DNS server setup check: ')
-
+    $Status = ""
     $DNSAddresses = Get-DnsClientServerAddress | Select-Object –ExpandProperty ServerAddresses
-
     # Check primary DNS
     $FoundPrimaryDNS = $false
     foreach ($OnPremIPAddress in $OnPremIPAddresses) {
@@ -139,30 +230,60 @@ function Test-CheckDNS {
     }
 
     if ($FoundPrimaryDNS -and $FoundSecondaryDNS) {
-        [void]$LogStringBuilder.AppendLine('PASSED')
+        $Status = "PASSED"
     } else {
-        [void]$LogStringBuilder.AppendLine('FAILED')
+        $Status = "WARNING"
         [void]$LogStringBuilder.AppendLine(("Found Primary DNS server: {0}, Found Secondary DNS server (127.0.0.1): {1}" -f $FoundPrimaryDNS, $FoundSecondaryDNS))
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc (steps 15 through 18) for setup: https://cloud.google.com/architecture/deploy-fault-tolerant-active-directory-environment')
     }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
 
 
-function Test-CheckFQDN {
+function Test-CheckManagedADFQDN {
     param (
-        [string]$ManagedADDomainName
+        [string]$ManagedADDomainName,
+        [string[]]$OnPremIPAddresses
     )
-    $DnsLookup = Resolve-DnsName -Name $ManagedADDomainName -errorAction SilentlyContinue
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Managed AD domain lookup check: ')
-    if ($DnsLookup -eq $null) {
-        [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc for setup: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#creating-dns-forwarder')
-    } else {
-        [void]$LogStringBuilder.AppendLine('PASSED')
+    $Status = ""
+    foreach ($OnPremIPAddress in $OnPremIPAddresses) {
+        $DnsLookup = Resolve-DnsName -Name $ManagedADDomainName -Server $OnPremIPAddress -errorAction SilentlyContinue
+        if ($DnsLookup -eq $null) {
+            $Status = "FAILED"
+            [void]$LogStringBuilder.AppendLine("Failed to resolve managed AD domain name from on-prem IP: {0}" -f $OnPremIPAddress)
+        } else {
+            $Status = "PASSED"
+        }
     }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
+
+    return $LogStringBuilder.ToString()
+}
+
+function Test-CheckSQLServerFQDN {
+    param (
+        [string[]]$SQLServerSPNs,
+        [string[]]$OnPremIPAddresses
+    )
+    $LogStringBuilder = [System.Text.StringBuilder]::new()
+    $Status = ""
+    foreach ($OnPremIPAddress in $OnPremIPAddresses) {
+        foreach ($SPN in $SQLServerSPNs) {
+            $SQLServerLookup = Resolve-DnsName -Name $SPN -Server $OnPremIPAddress -errorAction SilentlyContinue
+            if ($SQLServerLookup -eq $null) {
+                $Status = "FAILED"
+                [void]$LogStringBuilder.AppendLine("Failed to resolve domain name: {0}" -f $SPN)
+            } else {
+                $Status = "PASSED"
+            }
+        }
+    }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
@@ -171,46 +292,37 @@ function Test-CheckDCReplication {
     param (
         [string]$OnPremDomainName
     )
+    $Status = ""
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Domain controller replication check: ')
-    $ReplicationFailures = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest
-    if ($ReplicationFailures -eq $null) {
-        [void]$LogStringBuilder.AppendLine('PASSED')
+    $ReplicationResults = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest
+    if ($ReplicationResults -eq $null) {
+        $Status = "PASSED"
     } else {
-        [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc to create and validate replication setup: https://cloud.google.com/architecture/deploy-fault-tolerant-active-directory-environment#testing_the_installation')
+        foreach ($Result in $ReplicationResults) {
+            if ($Result.FailureCount -gt 0) {
+                [void]$LogStringBuilder.AppendLine('Replication failures found on server: {0}' -f $Result.Server)
+            }
+        }
+        $Status = "FAILED"
     }
+
+    [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
 
 function Test-CheckDNSForwarding {
     param (
-        [string[]]$OnPremIPAddresses
+        [string]$ManagedADDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('DNS Forwarding check: ')
-    # DNS forwarder IP address will be the default gateway IP if this script is running on the primary DC. 
-    # Other DC's will have DNS forwarder IP as the address of the primary DC instead.
-    $DefaultGatewayAddress = Get-NetRoute -DestinationPrefix "0.0.0.0/0" | Select-Object -ExpandProperty "NextHop"
-    $FoundValidForwarder = $false
-    $DNSForwarderAddresses = (Get-DnsServerForwarder).IPAddress.IPAddressToString
-    foreach ($ForwarderAddress in $DNSForwarderAddresses) {
-        foreach ($OnPremIPAddress in $OnPremIPAddresses) {
-            if ($DefaultGatewayAddress -eq $ForwarderAddress -or $OnPremIPAddress -contains $ForwarderAddress) {
-                $FoundValidForwarder = $true
-                break
-            }
-        }
-    }
-
-    if ($FoundValidForwarder) {
+    [void]$LogStringBuilder.Append('Status: ')
+    $DNSForwarders = Get-DnsServerZone | Where-Object {($_.ZoneType -eq 'Forwarder') -and ($_.ZoneName -eq $ManagedADDomainName)}
+    if ($DNSForwarders -ne $null) {
         [void]$LogStringBuilder.AppendLine('PASSED')
     } else {
         [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc for conditional DNS forwarding setup: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#configuring-dns-forwarder')
     }
-
     return $LogStringBuilder.ToString()
 }
 
@@ -219,40 +331,45 @@ function Test-CheckTrustSetup {
         [string]$ManagedADDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Trust setup with Managed AD domain check: ')
-    $TrustStatus = Get-ADTrust -Filter "Target -eq '$ManagedADDomainName'"
-    if ($TrustStatus -eq $null) {
-        [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc for trust setup with Managed AD domain: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#setting-up-trust')
+    $Status = ""
+    $TrustDetails = Get-ADTrust -Filter "Target -eq '$ManagedADDomainName'"
+    if ($TrustDetails -eq $null) {
+        $Status = "FAILED"
     } else {
-        [void]$LogStringBuilder.AppendLine('PASSED')
+        if ($TrustDetails.TrustAttributes -eq 0) {
+            [void]$LogStringBuilder.AppendLine('Detected an external trust with Managed AD domain: {0}. Please use a forest trust instead.' -f $ManagedADDomainName)
+            $Status = "FAILED"
+        } else {
+            $Status = "PASSED"
+        }
     }
+
+    [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
 
 function Test-CheckLocalSecurityPolicy {
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Local security policy check: ')
+    [void]$LogStringBuilder.Append('Status: ')
     $CurrentPath = (Get-Location).Path
     $SecurityConfigExportPath = $CurrentPath + "\diagnose-ad-security-policy.cfg"
     secedit /export /cfg $SecurityConfigExportPath /quiet
     $NetworkNamedPipesConfig = Get-Content $SecurityConfigExportPath | Select-string -pattern "NullSessionPipes" -encoding unicode | Select -first 1
+    $ConfigArray = $NetworkNamedPipesConfig.ToString().Split(",")
     $ExpectedValues = "netlogon", "samr", "lsarpc"
-    $FoundConfig = $true
+    $FoundConfig = 0
     foreach ($Value in $ExpectedValues) {
-        $RegexValue = "*" + $Value + "*"
-        if (!($NetworkNamedPipesConfig -like $RegexValue)) {
-            $FoundConfig = $false
+        if ($ConfigArray.Contains($Value)) {
+            $FoundConfig += 1
         }
     }
 
     Remove-Item -Path $SecurityConfigExportPath
-    if ($FoundConfig) {
+    if ($FoundConfig -eq 3) {
         [void]$LogStringBuilder.AppendLine('PASSED')
     } else {
         [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc for local security policy setup: https://cloud.google.com/managed-microsoft-ad/docs/create-trust?hl=en#verifying-local-security-policy')
     }
 
     return $LogStringBuilder.toString()
@@ -264,7 +381,7 @@ function Test-CheckNameSuffixRouting() {
         [string]$ManagedADDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Name suffix routing check: ')
+    [void]$LogStringBuilder.Append('Status: ')
     $NameSuffixes = netdom trust $OnPremDomainName /namesuffixes:$ManagedADDomainName
     $ExpectedString = "*.{0}, Name Suffix, Enabled" -f $ManagedADDomainName
     $FoundNameSuffix = $false
@@ -278,124 +395,211 @@ function Test-CheckNameSuffixRouting() {
         [void]$LogStringBuilder.AppendLine('PASSED')
     } else {
         [void]$LogStringBuilder.AppendLine('FAILED')
-        [void]$LogStringBuilder.AppendLine('Refer to the following doc to refresh name suffix routing: https://cloud.google.com/managed-microsoft-ad/docs/manage-trusts#name-suffix-routing')
     }
 
     return $LogStringBuilder.ToString()
 }
 
-function Test-CheckKerberos {
+function Test-CheckKerberosOnPremDomain {
     param (
         [string]$OnPremDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Kerberos ticket check: ')
+    $Status = ""
     $ListKerberosTicketResponse = klist
-    $RegexValue = "*krbtgt/{0}*" -f $OnPremDomainName
-    if ($ListKerberosTicketResponse -like $RegexValue) {
-        [void]$LogStringBuilder.AppendLine('PASSED')
+    $SPN = "krbtgt/{0}" -f $OnPremDomainName
+    $GotTicket = Get-KerberosTicket -SPN $SPN -ListKerberosTicketResponse $ListKerberosTicketResponse
+    if (!$GotTicket) {
+        [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
+        $Status = "FAILED"
     } else {
-        $GetKerberosTicketResponse = klist get krbtgt/$OnPremDomainName
-        if ($GetKerberosTicketResponse -like "*klist failed with*") {
-            [void]$LogStringBuilder.AppendLine('FAILED')
-            [void]$LogStringBuilder.AppendLine(('Kerberos ticket did not exist and was NOT but was able to generate a new Kerberos ticket for SPN: krbtgt/{0}' -f $OnPremDomainName))
-        } else {
-            [void]$LogStringBuilder.AppendLine('PASSED')
-            [void]$LogStringBuilder.AppendLine(('Kerberos ticket did not exist but was able to generate a new Kerberos ticket for SPN: krbtgt/{0}' -f $OnPremDomainName))
-        }        
+        $Status = "PASSED"
     }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
 
+function Test-CheckKerberosSQLServer {
+    param (
+        [string[]]$SQLServerIPSPNs,
+        [string[]]$SQLServerHostSPNs
+    )
+    $LogStringBuilder = [System.Text.StringBuilder]::new()
+    $Status = ""
+    $ListKerberosTicketResponse = klist
+    $TicketFailedForHost = $false
+    $TicketFailedForIP = $false
+    foreach ($SPN in $SQLServerHostSPNs) {
+        $FullSQLServerSPN = "MSSQLSvc/{0}:1433" -f $SPN
+        $GotTicket = Get-KerberosTicket -SPN $FullSQLServerSPN -ListKerberosTicketResponse $ListKerberosTicketResponse
+        if (!$GotTicket) {
+            $TicketFailedForHost = $true
+            [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
+        }
+    }
+
+    # Try checking if IP is used in SPN since we failed to retrieve ticket with DNS-based host name.
+    if ($TicketFailedForHost) {
+        foreach ($SPN in $SQLServerIPSPNs) {
+            $FullSQLServerSPN = "MSSQLSvc/{0}:1433" -f $SPN
+            $GotTicket = Get-KerberosTicket -SPN $FullSQLServerSPN -ListKerberosTicketResponse $ListKerberosTicketResponse
+            if (!$GotTicket) {
+                $TicketFailedForIP = $true
+                [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
+                # Check if registry value is set to allow use of IP address hostnames in SPN.
+                $RegistryValue = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters' -ErrorAction SilentlyContinue).TryIPSPN
+                if ($RegistryValue -eq $null -or $RegistryValue -ne 1) {
+                    [void]$LogStringBuilder.AppendLine("Failed to find registry entry TryIPSPN with value equal to 1 at path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters")
+                }
+            }
+        }   
+    }
+
+    if ($TicketFailedForHost -or $TicketFailedForIP) {
+        $Status = "FAILED"
+    } else {
+        $Status = "PASSED"
+    }
+
+    [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
+
+
+    return $LogStringBuilder.ToString()
+}
+
+function Get-KerberosTicket {
+    param (
+        [string]$SPN,
+        [object[]]$ListKerberosTicketResponse
+    )
+    $ExpectedRegex = "*{0}*" -f $SPN
+    if ($ListKerberosTicketResponse -like $ExpectedRegex) {
+        return $true
+    } else {
+        $GetKerberosTicketResponse = klist get $SPN
+        if ($GetKerberosTicketResponse -like "*klist failed with*") {
+            return $false
+        } else {
+            return $true
+        }
+    }
+}
+
+
+Clear-Host
+
+#Check Script is running with Elevated Privileges
+#Check-RunAsAdministrator
 
 #Inputs: 
-# 1. On-prem domain name 
+# 1. On-prem domain name
 # 2. Managed AD domain name
+# 3. SQL Server SPNs
 <# TODO - Get input from user instead of setting the below two variables #>
-Clear-Host
-# Output logs to file.
-$CurrentPath = (Get-Location).Path
-$OutputLogPath = $CurrentPath + "\ad-diagnosis-log.txt"
 
-
+<#
 $OnPremDomainName = "myonprem.com"
 $ManagedADDomainName = "adprod3.com"
+$SQLServerSPNs = "private.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "public.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "proxy.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "1.2.3.4", "4.5.6.7"
+private.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, public.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, proxy.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, 1.2.3.4, 4.5.6.7
+#>
+
+$OnPremDomainName = Read-Host -Prompt 'Input your on-oprem domain name (Example: my-onprem-domain.com)'
+$ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
+$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) SPN''s and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
+$SQLServerSPNs = $SQLServerSPNList.Split(',').Trim()
+
+$SQLServerIPSPNs, $SQLServerHostSPNs = Separate-SPNsByIPAndHost -SQLServerSPNs $SQLServerSPNs
+
 # Get IP addresses for all on-prem domain controllers in the AD forest
-$OnPremIPAddresses = (Get-ADForest).Domains | %{ Get-ADDomainController -Filter * -Server $OnPremDomainName } | Select -ExpandProperty IPV4Address  #| Format-Table -Property Name,ComputerObjectDN,Domain,Forest,IPv4Address,OperatingSystem,OperatingSystemVersion
+$OnPremIPAddresses = $null
+$OnPremIPAddresses = (Get-ADForest).Domains | %{ Get-ADDomainController -Filter * -Server $OnPremDomainName } | Select -ExpandProperty IPV4Address
 
+if ($OnPremIPAddresses -eq $null) {
+    Write-Output ("No on-prem domain controllers found in the given on-prem domain name. Verify that this script is running on a domain controller of the on-prem domain: {0}. Exiting..." -f $OnPremDomainName)
+    Exit
+}
 
-# Check for ports
+# Check for available on-prem domain controllers
+Write-Host -ForegroundColor Yellow "`n`nChecking for available on-prem domain controllers..."
+$OnPremIPAddresses, $CheckDCResult = Test-CheckAvailableDCs -OnPremIPAddresses $OnPremIPAddresses
+Write-Output $CheckDCResult
+# End of check for available on-prem domain controllers
+
+# Check for ports (Note: For TCP port check, the RPC port range is 49153 - 65534 but not all ports in this range are consistently open so only checking a few)
+$RPCPorts = @(49153, (Get-Random -Minimum 49153 -Maximum 65534), 65534)
+$TCPPorts = @(53, 88, 135, 389, 445, 464) + $RPCPorts
 Write-Host -ForegroundColor Yellow "`n`nChecking TCP and UDP ports for on-prem domain controllers... (This operation can take up to 45sc)"
-$TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 135, 389, 445, 464, 49668 <#49153, 50123, 65534#> -Protocol "TCP"
-$TCPResult | Out-File -FilePath $OutputLogPath
-$UDPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 389, 445, 464 -Protocol "UDP"
-$UDPResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for TCP and UDP ports completed."
+$TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports $TCPPorts -Protocol "TCP"
+Write-Output $TCPResult
+$UDPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 389, 464 -Protocol "UDP"
+Write-Output $UDPResult
 # End of check for ports
-
 
 # Check for Managed AD fully qualified domain name (FQDN)
 Write-Host -ForegroundColor Yellow "`n`nChecking Managed AD domain lookup..."
-$FQDNResult = Test-CheckFQDN -ManagedADDomainName $ManagedADDomainName  
-$FQDNResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for Managed AD domain lookup completed."
+$FQDNResult = Test-CheckManagedADFQDN -ManagedADDomainName $ManagedADDomainName -OnPremIPAddresses $OnPremIPAddresses
+Write-Output $FQDNResult
 # End of check for Managed AD fully qualified domain name
 
+# Check for SQL Server fully qualified domain name (FQDN)
+Write-Host -ForegroundColor Yellow "`n`nChecking SQL Server domain lookup..."
+$FQDNResult = Test-CheckSQLServerFQDN -SQLServerSPNs $SQLServerHostSPNs -OnPremIPAddresses $OnPremIPAddresses
+Write-Output $FQDNResult
+# End of check for SQL Server fully qualified domain name
 
 # Check DNS server setup
 Write-Host -ForegroundColor Yellow "`n`nChecking domain controller DNS server setup..."
 $DNSResult = Test-CheckDNS -OnPremIPAddresses $OnPremIPAddresses
-$DNSResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for DNS server setup completed."
+Write-Output $DNSResult
 # End of check for DNS setup
 
 # Check for domain controller replication
-if ($OnPremIPAddresses.Length > 1) {
+if ($OnPremIPAddresses.Count -gt 1) {
     Write-Host -ForegroundColor Yellow "`n`nChecking domain controller replication..."
     $DCReplicationResult = Test-CheckDCReplication -OnPremDomainName $OnPremDomainName 
-    $DCReplicationResult | Out-File -FilePath $OutputLogPath -Append
-    Write-Host -ForegroundColor Yellow "`n`nCheck for DNS server setup completed."
+    Write-Output $DCReplicationResult
 } else {
-    Write-Host -ForegroundColor Yellow "`n`nSkipping domain controller replication check as only one on-prem domain controller was found..."
-} 
+    Write-Host -ForegroundColor Yellow "`n`nSkipping domain controller replication check as only one available on-prem domain controller was found..."
+}
 # End of check for domain controller replication
 
 # Check for DNS Forwarding
 Write-Host -ForegroundColor Yellow "`n`nChecking DNS Forwarding setup..."
-$DNSForwardingResult = Test-CheckDNSForwarding -OnPremIPAddresses $OnPremIPAddresses
-$DNSForwardingResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for DNS forwarding setup completed."
+$DNSForwardingResult = Test-CheckDNSForwarding -ManagedADDomainName $ManagedADDomainName
+Write-Output $DNSForwardingResult
 # End of check for DNS Forwarding
-
 
 # Check for trust setup
 Write-Host -ForegroundColor Yellow "`n`nChecking trust setup with Managed AD domain..."
 $TrustSetupResult = Test-CheckTrustSetup -ManagedADDomainName $ManagedADDomainName
-$TrustSetupResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for trust setup completed."
+Write-Output $TrustSetupResult
 # End of check for trust setup
 
 # Check for local security policy
 Write-Host -ForegroundColor Yellow "`n`nChecking local security policy..."
 $LocalSecurityPolicyResult = Test-CheckLocalSecurityPolicy
-$LocalSecurityPolicyResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for local security policy completed."
+Write-Output $LocalSecurityPolicyResult
 # End of check for local security policy
 
-
 # Check for Name Suffix Routing
-Write-Host -ForegroundColor Yellow "`n`nChecking if name suffix routing is enabled..."
+Write-Host -ForegroundColor Yellow "`n`nChecking name suffix routing is enabled..."
 $NameSuffixRoutingResult = Test-CheckNameSuffixRouting -OnPremDomainName $OnPremDomainName -ManagedADDomainName $ManagedADDomainName
-$NameSuffixRoutingResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for name suffix routing completed."
+Write-Output $NameSuffixRoutingResult
 # End of check for Name Suffix Routing
 
-# Check for Kerberos ticket
-Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket..."
-$KerberosResult = Test-CheckKerberos($OnPremDomainName)
-$KerberosResult | Out-File -FilePath $OutputLogPath -Append
-Write-Host -ForegroundColor Yellow "`n`nCheck for Kerberos ticket completed."
-# End of check for Kerberos ticket
+# Check for Kerberos ticket for on-prem domain
+Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for on-prem domain..."
+$KerberosResult = Test-CheckKerberosOnPremDomain -OnPremDomainName $OnPremDomainName
+Write-Output $KerberosResult
+# End of check for Kerberos ticket for on-prem domain
 
-Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. See results at - {0}" -f $OutputLogPath) 
+# Check for Kerberos ticket for SQL Server
+Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for SQL Server domains..."
+$KerberosResult = Test-CheckKerberosSQLServer -SQLServerIPSPNs $SQLServerIPSPNs -SQLServerHostSPNs $SQLServerHostSPNs
+Write-Output $KerberosResult
+# End of check for Kerberos ticket for SQL Server
+
+Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc") 
