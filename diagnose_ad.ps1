@@ -336,11 +336,16 @@ function Test-CheckTrustSetup {
     if ($TrustDetails -eq $null) {
         $Status = "FAILED"
     } else {
-        if ($TrustDetails.TrustAttributes -eq 0) {
+        $ForestTrustValue = 8
+        if (($TrustDetails.TrustAttributes -band $ForestTrustValue) -ne 0) {
+            $Status = "PASSED"
+            if ($TrustDetails.Direction -like '*Disabled*') {
+                [void]$LogStringBuilder.AppendLine('Trust is disabled with Managed AD domain: {0}. Please enable the trust.' -f $ManagedADDomainName)
+                $Status = "FAILED"
+            }
+        } else {
             [void]$LogStringBuilder.AppendLine('Detected an external trust with Managed AD domain: {0}. Please use a forest trust instead.' -f $ManagedADDomainName)
             $Status = "FAILED"
-        } else {
-            $Status = "PASSED"
         }
     }
 
@@ -492,19 +497,6 @@ Clear-Host
 
 #Check Script is running with Elevated Privileges
 #Check-RunAsAdministrator
-
-#Inputs: 
-# 1. On-prem domain name
-# 2. Managed AD domain name
-# 3. SQL Server SPNs
-<# TODO - Get input from user instead of setting the below two variables #>
-
-<#
-$OnPremDomainName = "myonprem.com"
-$ManagedADDomainName = "adprod3.com"
-$SQLServerSPNs = "private.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "public.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "proxy.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com", "1.2.3.4", "4.5.6.7"
-private.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, public.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, proxy.default-vpc-inst.us-central1.priyampatel-playground-ad-2.cloudsql.adprod3.com, 1.2.3.4, 4.5.6.7
-#>
 
 $OnPremDomainName = Read-Host -Prompt 'Input your on-oprem domain name (Example: my-onprem-domain.com)'
 $ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
