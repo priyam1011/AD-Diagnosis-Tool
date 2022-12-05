@@ -1,31 +1,6 @@
- function Check-RunAsAdministrator()
-{
-  #Get current user context
-  $CurrentUser = New-Object Security.Principal.WindowsPrincipal $([Security.Principal.WindowsIdentity]::GetCurrent())
-  
-  #Check user is running the script is member of Administrator Group
-  if($CurrentUser.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator))
-  {
-       Write-host "Script is running with Administrator privileges!"
-  }
-  else
-    {
-       #Create a new Elevated process to Start PowerShell
-       $ElevatedProcess = New-Object System.Diagnostics.ProcessStartInfo "PowerShell";
- 
-       # Specify the current script path and name as a parameter
-       $ElevatedProcess.Arguments = "& '" + $script:MyInvocation.MyCommand.Path + "'"
- 
-       #Set the Process to elevated
-       $ElevatedProcess.Verb = "runas"
- 
-       #Start the new elevated process
-       [System.Diagnostics.Process]::Start($ElevatedProcess)
- 
-       #Exit from the current, unelevated, process
-       Exit
- 
-    }
+ function Test-Admin {
+    $currentUser = New-Object Security.Principal.WindowsPrincipal $([Security.Principal.WindowsIdentity]::GetCurrent())
+    $currentUser.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
 
 function Separate-SPNsByIPAndHost {
@@ -212,8 +187,8 @@ function Test-CheckDNS {
         [string[]]$OnPremIPAddresses
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
-    $DNSAddresses = Get-DnsClientServerAddress | Select-Object –ExpandProperty ServerAddresses
+    $Status = "WARNING"
+    $DNSAddresses = Get-DnsClientServerAddress | Select-Object -ExpandProperty ServerAddresses
     # Check primary DNS
     $FoundPrimaryDNS = $false
     foreach ($OnPremIPAddress in $OnPremIPAddresses) {
@@ -232,7 +207,6 @@ function Test-CheckDNS {
     if ($FoundPrimaryDNS -and $FoundSecondaryDNS) {
         $Status = "PASSED"
     } else {
-        $Status = "WARNING"
         [void]$LogStringBuilder.AppendLine(("Found Primary DNS server: {0}, Found Secondary DNS server (127.0.0.1): {1}" -f $FoundPrimaryDNS, $FoundSecondaryDNS))
     }
 
@@ -248,17 +222,19 @@ function Test-CheckManagedADFQDN {
         [string[]]$OnPremIPAddresses
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
+    $Status = "FAILED"
+    $FoundFailure = $false
     foreach ($OnPremIPAddress in $OnPremIPAddresses) {
         $DnsLookup = Resolve-DnsName -Name $ManagedADDomainName -Server $OnPremIPAddress -errorAction SilentlyContinue
         if ($DnsLookup -eq $null) {
-            $Status = "FAILED"
+            $FoundFailure = $true
             [void]$LogStringBuilder.AppendLine("Failed to resolve managed AD domain name from on-prem IP: {0}" -f $OnPremIPAddress)
-        } else {
-            $Status = "PASSED"
         }
     }
 
+    if (!$FoundFailure) {
+        $Status = "PASSED"
+    }
     [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
@@ -270,12 +246,14 @@ function Test-CheckSQLServerFQDN {
         [string[]]$OnPremIPAddresses
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
+    if ($SQLServerSPNs.Count -eq 0) {
+        [void]$LogStringBuilder.AppendLine("Found no valid SQL Server domain names provided in input")
+    }
+    $Status = "FAILED"
     foreach ($OnPremIPAddress in $OnPremIPAddresses) {
         foreach ($SPN in $SQLServerSPNs) {
             $SQLServerLookup = Resolve-DnsName -Name $SPN -Server $OnPremIPAddress -errorAction SilentlyContinue
             if ($SQLServerLookup -eq $null) {
-                $Status = "FAILED"
                 [void]$LogStringBuilder.AppendLine("Failed to resolve domain name: {0}" -f $SPN)
             } else {
                 $Status = "PASSED"
@@ -292,9 +270,9 @@ function Test-CheckDCReplication {
     param (
         [string]$OnPremDomainName
     )
-    $Status = ""
+    $Status = "FAILED"
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $ReplicationResults = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest
+    $ReplicationResults = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest -errorAction SilentlyContinue
     if ($ReplicationResults -eq $null) {
         $Status = "PASSED"
     } else {
@@ -303,7 +281,6 @@ function Test-CheckDCReplication {
                 [void]$LogStringBuilder.AppendLine('Replication failures found on server: {0}' -f $Result.Server)
             }
         }
-        $Status = "FAILED"
     }
 
     [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
@@ -331,21 +308,17 @@ function Test-CheckTrustSetup {
         [string]$ManagedADDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
+    $Status = "FAILED"
     $TrustDetails = Get-ADTrust -Filter "Target -eq '$ManagedADDomainName'"
-    if ($TrustDetails -eq $null) {
-        $Status = "FAILED"
-    } else {
+    if ($TrustDetails -ne $null) {
         $ForestTrustValue = 8
         if (($TrustDetails.TrustAttributes -band $ForestTrustValue) -ne 0) {
             $Status = "PASSED"
             if ($TrustDetails.Direction -like '*Disabled*') {
                 [void]$LogStringBuilder.AppendLine('Trust is disabled with Managed AD domain: {0}. Please enable the trust.' -f $ManagedADDomainName)
-                $Status = "FAILED"
             }
         } else {
             [void]$LogStringBuilder.AppendLine('Detected an external trust with Managed AD domain: {0}. Please use a forest trust instead.' -f $ManagedADDomainName)
-            $Status = "FAILED"
         }
     }
 
@@ -356,7 +329,7 @@ function Test-CheckTrustSetup {
 
 function Test-CheckLocalSecurityPolicy {
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Status: ')
+    $Status = "FAILED"
     $CurrentPath = (Get-Location).Path
     $SecurityConfigExportPath = $CurrentPath + "\diagnose-ad-security-policy.cfg"
     secedit /export /cfg $SecurityConfigExportPath /quiet
@@ -371,11 +344,11 @@ function Test-CheckLocalSecurityPolicy {
     }
 
     Remove-Item -Path $SecurityConfigExportPath
-    if ($FoundConfig -eq 3) {
-        [void]$LogStringBuilder.AppendLine('PASSED')
-    } else {
-        [void]$LogStringBuilder.AppendLine('FAILED')
+    if ($FoundConfig -eq $ExpectedValues.Count) {
+        $Status = "PASSED"
     }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.toString()
 }
@@ -386,21 +359,22 @@ function Test-CheckNameSuffixRouting() {
         [string]$ManagedADDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    [void]$LogStringBuilder.Append('Status: ')
+    $Status = "FAILED"
     $NameSuffixes = netdom trust $OnPremDomainName /namesuffixes:$ManagedADDomainName
     $ExpectedString = "*.{0}, Name Suffix, Enabled" -f $ManagedADDomainName
     $FoundNameSuffix = $false
     foreach ($Line in $NameSuffixes) {
         if ($Line -like $ExpectedString) {
             $FoundNameSuffix = $true
+            break
         }
     }
 
     if($FoundNameSuffix) {
-        [void]$LogStringBuilder.AppendLine('PASSED')
-    } else {
-        [void]$LogStringBuilder.AppendLine('FAILED')
+        $Status = "PASSED"
     }
+
+    [void]$LogStringBuilder.AppendLine('Status: {0}' -f $Status)
 
     return $LogStringBuilder.ToString()
 }
@@ -410,13 +384,12 @@ function Test-CheckKerberosOnPremDomain {
         [string]$OnPremDomainName
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
+    $Status = "FAILED"
     $ListKerberosTicketResponse = klist
     $SPN = "krbtgt/{0}" -f $OnPremDomainName
     $GotTicket = Get-KerberosTicket -SPN $SPN -ListKerberosTicketResponse $ListKerberosTicketResponse
     if (!$GotTicket) {
         [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
-        $Status = "FAILED"
     } else {
         $Status = "PASSED"
     }
@@ -432,39 +405,40 @@ function Test-CheckKerberosSQLServer {
         [string[]]$SQLServerHostSPNs
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    $Status = ""
+    $Status = "FAILED"
     $ListKerberosTicketResponse = klist
-    $TicketFailedForHost = $false
-    $TicketFailedForIP = $false
+    $TicketFailedForHost = $true
+    $TicketFailedForIP = $true
     foreach ($SPN in $SQLServerHostSPNs) {
         $FullSQLServerSPN = "MSSQLSvc/{0}:1433" -f $SPN
         $GotTicket = Get-KerberosTicket -SPN $FullSQLServerSPN -ListKerberosTicketResponse $ListKerberosTicketResponse
-        if (!$GotTicket) {
-            $TicketFailedForHost = $true
+        if ($GotTicket) {
+            $TicketFailedForHost = $false
+        } else {
             [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
         }
     }
 
     # Try checking if IP is used in SPN since we failed to retrieve ticket with DNS-based host name.
     if ($TicketFailedForHost) {
-        foreach ($SPN in $SQLServerIPSPNs) {
-            $FullSQLServerSPN = "MSSQLSvc/{0}:1433" -f $SPN
-            $GotTicket = Get-KerberosTicket -SPN $FullSQLServerSPN -ListKerberosTicketResponse $ListKerberosTicketResponse
-            if (!$GotTicket) {
-                $TicketFailedForIP = $true
-                [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $SPN)
-                # Check if registry value is set to allow use of IP address hostnames in SPN.
-                $RegistryValue = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters' -ErrorAction SilentlyContinue).TryIPSPN
-                if ($RegistryValue -eq $null -or $RegistryValue -ne 1) {
-                    [void]$LogStringBuilder.AppendLine("Failed to find registry entry TryIPSPN with value equal to 1 at path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters")
+        # Check if registry value is set to allow use of IP address hostnames in SPN.
+        $RegistryValue = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters' -ErrorAction SilentlyContinue).TryIPSPN
+        if ($RegistryValue -eq $null -or $RegistryValue -ne 1) {
+            [void]$LogStringBuilder.AppendLine("Failed to find registry entry TryIPSPN with value equal to 1 at path HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters")
+        } else {
+            foreach ($SPN in $SQLServerIPSPNs) {
+                $FullSQLServerSPN = "MSSQLSvc/{0}:1433" -f $SPN
+                $GotTicket = Get-KerberosTicket -SPN $FullSQLServerSPN -ListKerberosTicketResponse $ListKerberosTicketResponse
+                if (!$GotTicket) {
+                    [void]$LogStringBuilder.AppendLine("Failed to get kerberos ticket for SPN: {0}" -f $FullSQLServerSPN)
+                } else {
+                    $TicketFailedForIP = $false
                 }
             }
-        }   
+        }
     }
 
-    if ($TicketFailedForHost -or $TicketFailedForIP) {
-        $Status = "FAILED"
-    } else {
+    if (!$TicketFailedForHost -or !$TicketFailedForIP) {
         $Status = "PASSED"
     }
 
@@ -495,12 +469,18 @@ function Get-KerberosTicket {
 
 Clear-Host
 
-#Check Script is running with Elevated Privileges
-#Check-RunAsAdministrator
+# Check Script is running with Elevated Privileges
+if ((Test-Admin) -eq $false)  {
+    Write-Output 'Script needs to run with Administrator privileges. Attempting to self-eleveate...'
+    Start-Process powershell.exe -Verb RunAs -ArgumentList ('-noprofile -noexit -file "{0}" -elevated' -f ($myinvocation.MyCommand.Definition))
+    exit
+} else {
+    Write-Output 'Script is running with Administrator privileges'
+}
 
 $OnPremDomainName = Read-Host -Prompt 'Input your on-oprem domain name (Example: my-onprem-domain.com)'
 $ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
-$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) SPN''s and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
+$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) FQDN''s and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
 $SQLServerSPNs = $SQLServerSPNList.Split(',').Trim()
 
 $SQLServerIPSPNs, $SQLServerHostSPNs = Separate-SPNsByIPAndHost -SQLServerSPNs $SQLServerSPNs
