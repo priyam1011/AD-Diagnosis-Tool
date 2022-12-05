@@ -246,9 +246,6 @@ function Test-CheckSQLServerFQDN {
         [string[]]$OnPremIPAddresses
     )
     $LogStringBuilder = [System.Text.StringBuilder]::new()
-    if ($SQLServerSPNs.Count -eq 0) {
-        [void]$LogStringBuilder.AppendLine("Found no valid SQL Server domain names provided in input")
-    }
     $Status = "FAILED"
     foreach ($OnPremIPAddress in $OnPremIPAddresses) {
         foreach ($SPN in $SQLServerSPNs) {
@@ -480,7 +477,7 @@ if ((Test-Admin) -eq $false)  {
 
 $OnPremDomainName = Read-Host -Prompt 'Input your on-oprem domain name (Example: my-onprem-domain.com)'
 $ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
-$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) FQDN''s and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
+$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) FQDNs and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
 $SQLServerSPNs = $SQLServerSPNList.Split(',').Trim()
 
 $SQLServerIPSPNs, $SQLServerHostSPNs = Separate-SPNsByIPAndHost -SQLServerSPNs $SQLServerSPNs
@@ -517,9 +514,13 @@ Write-Output $FQDNResult
 # End of check for Managed AD fully qualified domain name
 
 # Check for SQL Server fully qualified domain name (FQDN)
-Write-Host -ForegroundColor Yellow "`n`nChecking SQL Server domain lookup..."
-$FQDNResult = Test-CheckSQLServerFQDN -SQLServerSPNs $SQLServerHostSPNs -OnPremIPAddresses $OnPremIPAddresses
-Write-Output $FQDNResult
+if ($SQLServerHostSPNs.Count -gt 0) {
+    Write-Host -ForegroundColor Yellow "`n`nChecking SQL Server domain lookup..."
+    $FQDNResult = Test-CheckSQLServerFQDN -SQLServerSPNs $SQLServerHostSPNs -OnPremIPAddresses $OnPremIPAddresses
+    Write-Output $FQDNResult
+} else {
+    Write-Host -ForegroundColor Yellow "`n`nSkipping SQL Server FQDN check as input did not contain any SQL Server FQDNs..."
+}
 # End of check for SQL Server fully qualified domain name
 
 # Check DNS server setup
@@ -574,4 +575,4 @@ $KerberosResult = Test-CheckKerberosSQLServer -SQLServerIPSPNs $SQLServerIPSPNs 
 Write-Output $KerberosResult
 # End of check for Kerberos ticket for SQL Server
 
-Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc") 
+Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc")
