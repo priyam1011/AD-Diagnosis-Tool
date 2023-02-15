@@ -65,11 +65,6 @@ function Test-CheckAvailableDCs {
 }
 
 function Test-CheckPort {
-
-[cmdletbinding(  
-  DefaultParameterSetName = '',  
-  ConfirmImpact = 'low'  
-)]
   param(  
       [array]$OnPremIPAddresses,
       [array]$Ports,
@@ -169,7 +164,7 @@ function Test-CheckPort {
               [void]$LogStringBuilder.AppendLine("Protocol: {0}. IP Address: {1}. Closed/unreachable ports: {2}" -f ($Protocol, $IPAddress, ($ClosedPorts -join ', ')))
               $WarningState = $true
               foreach ($ClosedPort in $ClosedPorts) {
-                  if (!($RPCPorts -Contains $ClosedPort)) {
+                  if (!($ClosedPort -ge 49153 -and $ClosedPorts -le 65534)) {
                       $FailedState = $true
                       break
                   }
@@ -278,25 +273,23 @@ function Test-CheckSQLServerFQDN {
 }
 
 function Test-CheckDCReplication {
-  param (
-      [string]$OnPremDomainName
-  )
-  $Status = "FAILED"
-  $LogStringBuilder = [System.Text.StringBuilder]::new()
-  $ReplicationResults = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest -errorAction SilentlyContinue
-  if ($ReplicationResults -eq $null) {
-      $Status = "PASSED"
-  } else {
-      foreach ($Result in $ReplicationResults) {
-          if ($Result.FailureCount -gt 0) {
-              [void]$LogStringBuilder.AppendLine('Replication failures found on server: {0}' -f $Result.Server)
-          }
-      }
-  }
-
-  [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
-
-  return $LogStringBuilder.ToString()
+   param (
+       [string]$OnPremDomainName
+   )
+   $Status = "FAILED"
+   $LogStringBuilder = [System.Text.StringBuilder]::new()
+   $ReplicationResults = Get-ADReplicationFailure -Target $OnPremDomainName -Scope Forest -errorAction SilentlyContinue
+   if ($ReplicationResults -eq $null) {
+       $Status = "PASSED"
+   } else {
+       foreach ($Result in $ReplicationResults) {
+           if ($Result.FailureCount -gt 0) {
+               [void]$LogStringBuilder.AppendLine('Replication failures found on server: {0}' -f $Result.Server)
+           }
+       }
+   }
+   [void]$LogStringBuilder.Append('Status: {0}' -f $Status)
+   return $LogStringBuilder.ToString()
 }
 
 function Test-CheckDNSForwarding {
@@ -501,121 +494,122 @@ function Get-KerberosTicket {
 }
 
 
-Clear-Host
 
+function Run-Tool() {
+    Clear-Host
+    $RunAsAdmin = $null
+    # Check Script is running with Elevated Privileges
+    if ((Test-Admin) -eq $true)  {
+      Write-Output 'Script is running as Administrator.'
 
-$RunAsAdmin = $null
-# Check Script is running with Elevated Privileges
-if ((Test-Admin) -eq $true)  {
-  Write-Output 'Script is running as Administrator.'
+    } else {
+      $RunAsAdmin = Read-Host -Prompt 'Run script as Administrator? (y/yes or n/no)'
+      if ($RunAsAdmin -ieq "y" -or $RunAsAdmin -ieq "yes") {
+          Start-Process powershell.exe -Verb RunAs -ArgumentList ('-noprofile -noexit -file "{0}" -elevated' -f ($myinvocation.MyCommand.Definition))
+          exit
+      }
+    }
 
-} else {
-  $RunAsAdmin = Read-Host -Prompt 'Run script as Administrator? (y/yes or n/no)'
-  if ($RunAsAdmin -ieq "y" -or $RunAsAdmin -ieq "yes") {
-      Start-Process powershell.exe -Verb RunAs -ArgumentList ('-noprofile -noexit -file "{0}" -elevated' -f ($myinvocation.MyCommand.Definition))
-      exit
-  }
+    $OnPremDomainName = Read-Host -Prompt 'Input your on-prem domain name (Example: my-onprem-domain.com)'
+    $ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
+    $SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) FQDNs and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
+
+    $SQLServerSPNs = $SQLServerSPNList.Split(',').Trim()
+    $SQLServerIPSPNs, $SQLServerHostSPNs = Separate-SPNsByIPAndHost -SQLServerSPNs $SQLServerSPNs
+
+    # Get IP addresses for all on-prem domain controllers in the AD forest
+    $OnPremIPAddresses = $null
+    $OnPremIPAddresses = (Get-ADForest).Domains | %{ Get-ADDomainController -Filter * -Server $OnPremDomainName } | Select -ExpandProperty IPV4Address
+    
+    Write-Output $OnPremIPAddresses
+    if ($OnPremIPAddresses -eq $null) {
+      Write-Output ("No on-prem domain controllers found in the given on-prem domain name. Verify that this script is running on a domain controller of the on-prem domain: {0}. Exiting..." -f $OnPremDomainName)
+      Exit
+    }
+
+    # Check for available on-prem domain controllers
+    Write-Host -ForegroundColor Yellow "`n`nChecking for available on-prem domain controllers..."
+    $OnPremIPAddresses, $CheckDCResult = Test-CheckAvailableDCs -OnPremIPAddresses $OnPremIPAddresses
+    Write-Output $CheckDCResult
+    # End of check for available on-prem domain controllers
+
+    # Check for ports (Note: For TCP port check, the RPC port range is 49153 - 65534 but not all ports in this range are consistently open so only checking a few)
+    $RPCPorts = @(49153, (Get-Random -Minimum 49153 -Maximum 65534), 65534)
+    $TCPPorts = @(53, 88, 135, 389, 445, 464) + $RPCPorts
+    Write-Host -ForegroundColor Yellow "`n`nChecking TCP and UDP ports for on-prem domain controllers... (This operation can take up to 45sc)"
+    $TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports $TCPPorts -Protocol "TCP"
+    Write-Output $TCPResult
+    $UDPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 389, 464 -Protocol "UDP"
+    Write-Output $UDPResult
+    # End of check for ports
+
+    # Check for Managed AD fully qualified domain name (FQDN)
+    Write-Host -ForegroundColor Yellow "`n`nChecking Managed AD domain lookup..."
+    $FQDNResult = Test-CheckManagedADFQDN -ManagedADDomainName $ManagedADDomainName -OnPremIPAddresses $OnPremIPAddresses
+    Write-Output $FQDNResult
+    # End of check for Managed AD fully qualified domain name
+
+    # Check for SQL Server fully qualified domain name (FQDN)
+    if ($SQLServerHostSPNs.Count -gt 0) {
+      Write-Host -ForegroundColor Yellow "`n`nChecking SQL Server domain lookup..."
+      $FQDNResult = Test-CheckSQLServerFQDN -SQLServerSPNs $SQLServerHostSPNs -OnPremIPAddresses $OnPremIPAddresses
+      Write-Output $FQDNResult
+    } else {
+      Write-Host -ForegroundColor Yellow "`n`nSkipping SQL Server FQDN check as input did not contain any SQL Server FQDNs..."
+    }
+    # End of check for SQL Server fully qualified domain name
+
+    # Check DNS server setup
+    Write-Host -ForegroundColor Yellow "`n`nChecking domain controller DNS server setup..."
+    $DNSResult = Test-CheckDNS -OnPremIPAddresses $OnPremIPAddresses
+    Write-Output $DNSResult
+    # End of check for DNS setup
+
+    # Check for domain controller replication
+    if ($OnPremIPAddresses.Count -gt 1) {
+      Write-Host -ForegroundColor Yellow "`n`nChecking domain controller replication..."
+      $DCReplicationResult = Test-CheckDCReplication -OnPremDomainName $OnPremDomainName 
+      Write-Output $DCReplicationResult
+    } else {
+      Write-Host -ForegroundColor Yellow "`n`nSkipping domain controller replication check as only one available on-prem domain controller was found..."
+    }
+    # End of check for domain controller replication
+
+    # Check for DNS Forwarding
+    Write-Host -ForegroundColor Yellow "`n`nChecking DNS Forwarding setup..."
+    $DNSForwardingResult = Test-CheckDNSForwarding -ManagedADDomainName $ManagedADDomainName
+    Write-Output $DNSForwardingResult
+    # End of check for DNS Forwarding
+
+    # Check for trust setup
+    Write-Host -ForegroundColor Yellow "`n`nChecking trust setup with Managed AD domain..."
+    $TrustSetupResult = Test-CheckTrustSetup -ManagedADDomainName $ManagedADDomainName
+    Write-Output $TrustSetupResult
+    # End of check for trust setup
+
+    # Check for local security policy
+    Write-Host -ForegroundColor Yellow "`n`nChecking local security policy..."
+    $LocalSecurityPolicyResult = Test-CheckLocalSecurityPolicy
+    Write-Output $LocalSecurityPolicyResult
+    # End of check for local security policy
+
+    # Check for Name Suffix Routing
+    Write-Host -ForegroundColor Yellow "`n`nChecking name suffix routing is enabled..."
+    $NameSuffixRoutingResult = Test-CheckNameSuffixRouting -OnPremDomainName $OnPremDomainName -ManagedADDomainName $ManagedADDomainName
+    Write-Output $NameSuffixRoutingResult
+    # End of check for Name Suffix Routing
+
+    # Check for Kerberos ticket for on-prem domain
+    Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for on-prem domain..."
+    $KerberosResult = Test-CheckKerberosOnPremDomain -OnPremDomainName $OnPremDomainName
+    Write-Output $KerberosResult
+    # End of check for Kerberos ticket for on-prem domain
+
+    # Check for Kerberos ticket for SQL Server
+    Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for SQL Server domains..."
+    $KerberosResult = Test-CheckKerberosSQLServer -SQLServerIPSPNs $SQLServerIPSPNs -SQLServerHostSPNs $SQLServerHostSPNs
+    Write-Output $KerberosResult
+    # End of check for Kerberos ticket for SQL Server
+
+    Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc")
 }
-
-$OnPremDomainName = Read-Host -Prompt 'Input your on-oprem domain name (Example: my-onprem-domain.com)'
-$ManagedADDomainName = Read-Host -Prompt 'Input the Managed AD domain name from GCP (Example: my-managed-ad.com)'
-$SQLServerSPNList = Read-Host -Prompt 'Input a comma-separated list of your SQL Server instance(s) FQDNs and IP address(es) from GCP (Example: <private|public|proxy>.<instance-name>.<region>.<project-name>.cloudsql.<managed-ad-domain>.com, 1.2.3.4, 4.5.6.7)'
-
-$SQLServerSPNs = $SQLServerSPNList.Split(',').Trim()
-$SQLServerIPSPNs, $SQLServerHostSPNs = Separate-SPNsByIPAndHost -SQLServerSPNs $SQLServerSPNs
-
-# Get IP addresses for all on-prem domain controllers in the AD forest
-$OnPremIPAddresses = $null
-$OnPremIPAddresses = (Get-ADForest).Domains | %{ Get-ADDomainController -Filter * -Server $OnPremDomainName } | Select -ExpandProperty IPV4Address
-
-if ($OnPremIPAddresses -eq $null) {
-  Write-Output ("No on-prem domain controllers found in the given on-prem domain name. Verify that this script is running on a domain controller of the on-prem domain: {0}. Exiting..." -f $OnPremDomainName)
-  Exit
-}
-
-# Check for available on-prem domain controllers
-Write-Host -ForegroundColor Yellow "`n`nChecking for available on-prem domain controllers..."
-$OnPremIPAddresses, $CheckDCResult = Test-CheckAvailableDCs -OnPremIPAddresses $OnPremIPAddresses
-Write-Output $CheckDCResult
-# End of check for available on-prem domain controllers
-
-# Check for ports (Note: For TCP port check, the RPC port range is 49153 - 65534 but not all ports in this range are consistently open so only checking a few)
-$RPCPorts = @(49153, (Get-Random -Minimum 49153 -Maximum 65534), 65534)
-$TCPPorts = @(53, 88, 135, 389, 445, 464) + $RPCPorts
-Write-Host -ForegroundColor Yellow "`n`nChecking TCP and UDP ports for on-prem domain controllers... (This operation can take up to 45sc)"
-$TCPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports $TCPPorts -Protocol "TCP"
-Write-Output $TCPResult
-$UDPResult = Test-CheckPort -OnPremIPAddresses $OnPremIPAddresses -Ports 53, 88, 389, 464 -Protocol "UDP"
-Write-Output $UDPResult
-# End of check for ports
-
-# Check for Managed AD fully qualified domain name (FQDN)
-Write-Host -ForegroundColor Yellow "`n`nChecking Managed AD domain lookup..."
-$FQDNResult = Test-CheckManagedADFQDN -ManagedADDomainName $ManagedADDomainName -OnPremIPAddresses $OnPremIPAddresses
-Write-Output $FQDNResult
-# End of check for Managed AD fully qualified domain name
-
-# Check for SQL Server fully qualified domain name (FQDN)
-if ($SQLServerHostSPNs.Count -gt 0) {
-  Write-Host -ForegroundColor Yellow "`n`nChecking SQL Server domain lookup..."
-  $FQDNResult = Test-CheckSQLServerFQDN -SQLServerSPNs $SQLServerHostSPNs -OnPremIPAddresses $OnPremIPAddresses
-  Write-Output $FQDNResult
-} else {
-  Write-Host -ForegroundColor Yellow "`n`nSkipping SQL Server FQDN check as input did not contain any SQL Server FQDNs..."
-}
-# End of check for SQL Server fully qualified domain name
-
-# Check DNS server setup
-Write-Host -ForegroundColor Yellow "`n`nChecking domain controller DNS server setup..."
-$DNSResult = Test-CheckDNS -OnPremIPAddresses $OnPremIPAddresses
-Write-Output $DNSResult
-# End of check for DNS setup
-
-# Check for domain controller replication
-if ($OnPremIPAddresses.Count -gt 1) {
-  Write-Host -ForegroundColor Yellow "`n`nChecking domain controller replication..."
-  $DCReplicationResult = Test-CheckDCReplication -OnPremDomainName $OnPremDomainName 
-  Write-Output $DCReplicationResult
-} else {
-  Write-Host -ForegroundColor Yellow "`n`nSkipping domain controller replication check as only one available on-prem domain controller was found..."
-}
-# End of check for domain controller replication
-
-# Check for DNS Forwarding
-Write-Host -ForegroundColor Yellow "`n`nChecking DNS Forwarding setup..."
-$DNSForwardingResult = Test-CheckDNSForwarding -ManagedADDomainName $ManagedADDomainName
-Write-Output $DNSForwardingResult
-# End of check for DNS Forwarding
-
-# Check for trust setup
-Write-Host -ForegroundColor Yellow "`n`nChecking trust setup with Managed AD domain..."
-$TrustSetupResult = Test-CheckTrustSetup -ManagedADDomainName $ManagedADDomainName
-Write-Output $TrustSetupResult
-# End of check for trust setup
-
-# Check for local security policy
-Write-Host -ForegroundColor Yellow "`n`nChecking local security policy..."
-$LocalSecurityPolicyResult = Test-CheckLocalSecurityPolicy
-Write-Output $LocalSecurityPolicyResult
-# End of check for local security policy
-
-# Check for Name Suffix Routing
-Write-Host -ForegroundColor Yellow "`n`nChecking name suffix routing is enabled..."
-$NameSuffixRoutingResult = Test-CheckNameSuffixRouting -OnPremDomainName $OnPremDomainName -ManagedADDomainName $ManagedADDomainName
-Write-Output $NameSuffixRoutingResult
-# End of check for Name Suffix Routing
-
-# Check for Kerberos ticket for on-prem domain
-Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for on-prem domain..."
-$KerberosResult = Test-CheckKerberosOnPremDomain -OnPremDomainName $OnPremDomainName
-Write-Output $KerberosResult
-# End of check for Kerberos ticket for on-prem domain
-
-# Check for Kerberos ticket for SQL Server
-Write-Host -ForegroundColor Yellow "`n`nChecking Kerberos ticket retrieval for SQL Server domains..."
-$KerberosResult = Test-CheckKerberosSQLServer -SQLServerIPSPNs $SQLServerIPSPNs -SQLServerHostSPNs $SQLServerHostSPNs
-Write-Output $KerberosResult
-# End of check for Kerberos ticket for SQL Server
-
-Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc") 
-
