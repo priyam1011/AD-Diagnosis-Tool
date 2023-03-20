@@ -1,9 +1,8 @@
 # Cloud SQL - AD Diagnosis Tool
 
-The Cloud SQL AD Diagnosis Tool is a utility Powershell script that checks 
-for proper Active Directory (AD) setup for Cloud SQL - SQL Server instances.
+The Active Directory (AD) Diagnosis tool is a utility PowerShell script that helps you to troubleshoot AD setup issues with your on-premises domain and SQL Server instances in Google Cloud Platform.
 
-See the [public doc][public-doc] for more details about the tool.
+See the [Active Directory Diagnosis tool for Cloud SQL][public-doc] for more details about the tool.
 
 ## Contributing
 
