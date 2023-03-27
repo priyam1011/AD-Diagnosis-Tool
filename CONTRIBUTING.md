@@ -12,7 +12,7 @@
 
 ## Opening an issue
 
-If you find a bug in the proxy code or an inaccuracy in the documentation,
+If you find a bug in the code or an inaccuracy in the documentation,
 please open an issue. GitHub provides a guide, [Mastering
 Issues](https://guides.github.com/features/issues/), that is useful if you are
 unfamiliar with the process. Here are the specific steps for opening an issue:
@@ -23,7 +23,7 @@ unfamiliar with the process. Here are the specific steps for opening an issue:
 1. In the main editor, describe your issue.
 1. Click the submit button.
 
-Thank you. We will do our best to triage your issue within one business day, and
+Thank you. We will do our best to triage your issue, and
 attempt to categorize your issues with an estimate of the priority and issue
 type. We will try to respond with regular updates based on its priority:
 
