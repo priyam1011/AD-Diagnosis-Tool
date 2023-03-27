@@ -611,5 +611,5 @@ function Run-Tool() {
     Write-Output $KerberosResult
     # End of check for Kerberos ticket for SQL Server
 
-    Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "go/ad-tool-public-doc")
+    Write-Host -ForegroundColor Yellow ("`n`nActive Directory diagnosis complete. Refer to the following doc on how to resolve any of the above failures - {0}" -f "https://cloud.google.com/sql/docs/sqlserver/ad-diagnosis-tool")
 }
