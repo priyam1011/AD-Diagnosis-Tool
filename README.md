@@ -9,5 +9,5 @@ See the [Active Directory Diagnosis tool for Cloud SQL][public-doc] for more det
 Contributions are welcome. Please, see the [CONTRIBUTING][contributing] document
 for details.
 
-[public-doc]: https://cloud.google.com
+[public-doc]: https://cloud.google.com/sql/docs/sqlserver/ad-diagnosis-tool
 [contributing]: CONTRIBUTING.md
